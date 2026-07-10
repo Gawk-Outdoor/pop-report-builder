@@ -176,18 +176,25 @@ div[data-testid="stFileUploader"] {{
   margin: 0 auto !important;
 }}
 
-/* Dropzone text */
-div[data-testid="stFileUploaderDropzone"] * {{
-  color: #542D54 !important;
-  fill: #542D54 !important;
-  opacity: 1 !important;
+/* Hide the collapsed widget label. Streamlit renders it inside the uploader
+   with visibility:hidden; a blanket `opacity: 1` on descendants un-hides it,
+   which is what caused "upload" to overlap the Browse button. */
+div[data-testid="stFileUploader"] label[data-testid="stWidgetLabel"],
+div[data-testid="stFileUploader"] > label,
+div[data-testid="stFileUploader"] div[data-testid="stWidgetLabel"] {{
+  display: none !important;
 }}
+
+/* Dropzone text - scoped to the elements that actually carry text, never `*` */
+div[data-testid="stFileUploaderDropzone"] span,
+div[data-testid="stFileUploaderDropzone"] small,
+div[data-testid="stFileUploaderDropzone"] div,
+div[data-testid="stFileUploaderDropzone"] p {{
+  color: #542D54 !important;
+}}
+
 div[data-testid="stFileUploaderDropzone"] svg {{
   fill: #542D54 !important;
-}}
-div[data-testid="stFileUploaderDropzone"] small {{
-  color: #542D54 !important;
-  opacity: 1 !important;
 }}
 
 /* Browse button */

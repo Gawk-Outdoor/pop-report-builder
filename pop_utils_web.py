@@ -4,7 +4,8 @@ from pptx import Presentation
 from pptx.util import Cm, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
-from PIL import Image
+from PIL import Image, ImageOps
+import gc
 import io
 from typing import List, Tuple
 
@@ -12,7 +13,21 @@ from typing import List, Tuple
 SCRIPT_DIR = Path(__file__).resolve().parent if "__file__" in globals() else Path(".").resolve()
 ASSETS_DIR = SCRIPT_DIR / "assets"
 
-TEMPLATE_PATH = ASSETS_DIR / "PoP's Report - Template (Date).pptx"
+# --- Image sizing ---------------------------------------------------------
+# Slide images are placed into a fixed 24.89 x 12.87cm box. At 24.89cm
+# (~9.8in), 1600px gives ~163 DPI on the long edge - comfortably above the
+# 150 DPI print threshold. Anything larger is discarded by PowerPoint's
+# renderer anyway, but python-pptx retains every original blob in memory
+# until prs.save(), so oversized sources drive peak RSS on Render.
+MAX_IMAGE_EDGE_PX = 1600
+JPEG_QUALITY = 88
+
+TEMPLATE_PATHS = {
+    "new_campaign": ASSETS_DIR / "PoP Report - New Campaign Template.pptx",
+    "artwork_update": ASSETS_DIR / "PoP Report - Artwork Update Template.pptx",
+}
+DEFAULT_REPORT_TYPE = "new_campaign"
+
 LOGO_PATH = ASSETS_DIR / "GAWK LOGO (PURPLE).png"
 BACKGROUND_PATH = ASSETS_DIR / "Background.jpg"
 
@@ -69,6 +84,73 @@ def parse_filename(path_like) -> dict | None:
         }
     except Exception:
         return None
+
+
+def prepare_image(source, max_edge: int = MAX_IMAGE_EDGE_PX) -> io.BytesIO:
+    """
+    Load an image, correct EXIF orientation, downscale to fit `max_edge`,
+    and return it as an in-memory JPEG buffer.
+
+    python-pptx holds every image blob it is given until the presentation is
+    saved, so the size of what we hand it - not the size of the file on the
+    wire - determines peak memory. Downscaling here is what keeps long
+    campaigns viable without capping the number of photos.
+
+    Accepts anything Pillow can open: a Path, a file-like object, or a
+    Streamlit UploadedFile.
+    """
+    img = None
+    converted = None
+    try:
+        img = Image.open(source)
+        # Honour EXIF rotation before we discard the metadata.
+        img = ImageOps.exif_transpose(img)
+
+        if max(img.size) > max_edge:
+            img.thumbnail((max_edge, max_edge), Image.LANCZOS)
+
+        # JPEG cannot store an alpha channel or a palette.
+        if img.mode != "RGB":
+            converted = img.convert("RGB")
+            img.close()
+            img = converted
+            converted = None
+
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+        buffer.seek(0)
+        return buffer
+    finally:
+        if converted is not None:
+            converted.close()
+        if img is not None:
+            img.close()
+
+
+def _sort_key_from_name(filename: str):
+    """
+    Sort key, derived from a filename string rather than a Path:
+    1. By actual live date (earliest first)
+    2. Then by base filename (first 5 parts)
+    3. Then by suffix priority: Cam (0) < Mock (1) < Others (2)
+    """
+    try:
+        name = filename.lower()
+        parts = Path(filename).stem.split(" - ")
+        base_key = " - ".join(parts[:5]).lower()
+        suffix = name.split(" - ")[-1]
+
+        if "cam" in suffix:
+            suffix_priority = 0
+        elif "mock" in suffix:
+            suffix_priority = 1
+        else:
+            suffix_priority = 2
+
+        date = datetime.strptime(parts[4], "%d%m%y")
+        return (date, base_key, suffix_priority)
+    except Exception:
+        return (datetime.min, filename.lower(), 9)
 
 
 def extract_live_date_priority(path: Path):
@@ -148,39 +230,66 @@ def _add_text(slide, x, y, w, h, text, size=23, bold=True, color=RGBColor(255, 2
     run.font.color.rgb = color
 
 
-def generate_presentation_bytes(image_paths: List[Path]) -> Tuple[bytes, str]:
+def resolve_template(report_type: str) -> Path:
     """
-    Core PoP logic reproduced from the desktop GUI script,
-    but saving to an in-memory bytes object instead of using file dialogs.
+    Map a report type to its .pptx template, failing loudly on an unknown type
+    or a missing file rather than silently falling back to the wrong deck.
     """
-    # Filter & normalise
-    image_files: list[Path] = []
-    for p in image_paths:
-        p = Path(p)
-        if p.is_dir():
-            image_files.extend(
-                f for f in p.glob("*") if f.suffix.lower() in [".jpg", ".jpeg", ".png"]
-            )
-        elif p.suffix.lower() in [".jpg", ".jpeg", ".png"]:
-            image_files.append(p)
+    try:
+        template = TEMPLATE_PATHS[report_type]
+    except KeyError:
+        valid = ", ".join(sorted(TEMPLATE_PATHS))
+        raise ValueError(f"Unknown report type {report_type!r}. Expected one of: {valid}.") from None
 
-    image_files = sorted(image_files, key=extract_live_date_priority)
+    if not template.exists():
+        raise FileNotFoundError(f"Template missing for {report_type!r}: {template.name}")
 
-    if not image_files:
+    return template
+
+
+def generate_presentation_bytes(
+    images: List[Tuple[str, io.BytesIO]],
+    report_type: str = DEFAULT_REPORT_TYPE,
+) -> Tuple[bytes, str]:
+    """
+    Core PoP logic. Takes (filename, JPEG buffer) pairs - already downscaled -
+    and returns the finished .pptx as bytes.
+
+    `report_type` selects the base template. Both templates share identical
+    placeholder text and slide geometry; only the cover headline differs.
+
+    Nothing is written to disk. Buffers are released as soon as python-pptx has
+    copied them into the package.
+    """
+    template_path = resolve_template(report_type)
+
+    images = sorted(images, key=lambda pair: _sort_key_from_name(pair[0]))
+
+    if not images:
         raise FileNotFoundError("No JPG, JPEG, or PNG files found for PoP generation.")
 
-    first_info = parse_filename(image_files[0])
+    # Cover slide content comes from the first image whose filename parses.
+    # Unparseable names sort to the front (their date falls back to datetime.min),
+    # so indexing images[0] blindly would fail on an otherwise valid batch.
+    first_info = next(
+        (info for info in (parse_filename(n) for n, _ in images) if info),
+        None,
+    )
     if not first_info:
-        raise ValueError("First image filename is invalid. Cannot determine client/campaign/date.")
+        raise ValueError(
+            "No image filename matches the required convention. "
+            "Cannot determine client/campaign/date for the cover slide."
+        )
 
-    prs = Presentation(TEMPLATE_PATH)
+    prs = Presentation(template_path)
     blank_layout = prs.slide_layouts[5]
 
     _add_front_slide_content(prs, first_info)
 
-    for img_path in image_files:
-        details = parse_filename(img_path)
+    for filename, buffer in images:
+        details = parse_filename(filename)
         if not details:
+            buffer.close()
             continue
 
         slide = prs.slides.add_slide(blank_layout)
@@ -194,9 +303,12 @@ def generate_presentation_bytes(image_paths: List[Path]) -> Tuple[bytes, str]:
             height=Cm(21),
         )
 
-        # Main PoP image, scaled to fit the 24.89 x 12.87cm box at (3.4, 4.45)
-        img = Image.open(img_path)
-        iw, ih = img.size
+        # Main PoP image, scaled to fit the 24.89 x 12.87cm box at (3.4, 4.45).
+        # Read dimensions from the JPEG header without decoding pixel data.
+        buffer.seek(0)
+        with Image.open(buffer) as probe:
+            iw, ih = probe.size
+
         img_aspect = iw / ih
         box_aspect = 24.89 / 12.87
 
@@ -207,13 +319,16 @@ def generate_presentation_bytes(image_paths: List[Path]) -> Tuple[bytes, str]:
             new_height = Cm(12.87)
             new_width = Cm(12.87 * img_aspect)
 
+        buffer.seek(0)
         slide.shapes.add_picture(
-            str(img_path),
+            buffer,
             Cm(3.4),
             Cm(4.45),
             width=new_width,
             height=new_height,
         )
+        # python-pptx has copied the bytes into its own package part by now.
+        buffer.close()
 
         # Gawk logo top-right
         slide.shapes.add_picture(
@@ -295,27 +410,54 @@ def generate_presentation_bytes(image_paths: List[Path]) -> Tuple[bytes, str]:
 
     safe_client = first_info["client"].strip()
     safe_month = first_info["month_year"]
-    output_name = f"PoP Report - {safe_client} ({safe_month}).pptx"
+    # Distinguish the two report types so an artwork update doesn't overwrite
+    # a new campaign deck for the same client and month.
+    suffix = " - Artwork Update" if report_type == "artwork_update" else ""
+    output_name = f"PoP Report - {safe_client} ({safe_month}){suffix}.pptx"
 
     bio = io.BytesIO()
     prs.save(bio)
-    bio.seek(0)
-    return bio.read(), output_name
+
+    # prs.save() is the peak: python-pptx serialises every retained image blob
+    # into the zip buffer. Release the presentation before we materialise bytes.
+    del prs
+    gc.collect()
+
+    data = bio.getvalue()
+    bio.close()
+    gc.collect()
+
+    return data, output_name
 
 
-def generate_presentation_from_uploads(uploaded_files) -> Tuple[bytes, str]:
+def generate_presentation_from_uploads(
+    uploaded_files,
+    report_type: str = DEFAULT_REPORT_TYPE,
+) -> Tuple[bytes, str]:
     """
     Wrapper for Streamlit: takes a list of UploadedFile objects and returns
     (pptx_bytes, suggested_filename).
+
+    Images are downscaled one at a time and never touch the filesystem.
     """
-    temp_dir = SCRIPT_DIR / "uploaded_pop_images"
-    temp_dir.mkdir(exist_ok=True)
+    # Fail before decoding a single image if the template is wrong or missing.
+    resolve_template(report_type)
 
-    paths: list[Path] = []
-    for uf in uploaded_files:
-        dest = temp_dir / uf.name
-        with open(dest, "wb") as f:
-            f.write(uf.getbuffer())
-        paths.append(dest)
+    images: list[tuple[str, io.BytesIO]] = []
+    try:
+        for uf in uploaded_files:
+            if Path(uf.name).suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                continue
+            uf.seek(0)
+            images.append((uf.name, prepare_image(uf)))
 
-    return generate_presentation_bytes(paths)
+        return generate_presentation_bytes(images, report_type=report_type)
+    except Exception:
+        # generate_presentation_bytes closes buffers as it consumes them; on a
+        # failure part-way through, close whatever is still open.
+        for _, buffer in images:
+            if not buffer.closed:
+                buffer.close()
+        raise
+    finally:
+        gc.collect()

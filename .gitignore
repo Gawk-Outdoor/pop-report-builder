@@ -39,3 +39,15 @@
 
 # debug information files
 *.dwo
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Legacy — uploads now handled in memory
+uploaded_pop_images/

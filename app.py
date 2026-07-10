@@ -1,5 +1,21 @@
+import gc
+import shutil
+from pathlib import Path
+
 import streamlit as st
-from pop_utils_web import parse_filename, generate_presentation_from_uploads
+from pop_utils_web import (
+    DEFAULT_REPORT_TYPE,
+    SCRIPT_DIR,
+    generate_presentation_from_uploads,
+    parse_filename,
+)
+
+# Legacy: earlier versions wrote every upload here and never cleaned up.
+# Images are now processed entirely in memory. Clear any residue left behind
+# on the running instance.
+_LEGACY_UPLOAD_DIR = SCRIPT_DIR / "uploaded_pop_images"
+if _LEGACY_UPLOAD_DIR.exists():
+    shutil.rmtree(_LEGACY_UPLOAD_DIR, ignore_errors=True)
 
 st.set_page_config(
     page_title="PoP Report Builder",
@@ -17,6 +33,9 @@ st.session_state.setdefault("uploader_key", 0)
 st.session_state.setdefault("reset_nonce", 0)
 st.session_state.setdefault("pptx_bytes", None)
 st.session_state.setdefault("pptx_name", None)
+st.session_state.setdefault("report_type", DEFAULT_REPORT_TYPE)
+st.session_state.setdefault("cb_new_campaign", DEFAULT_REPORT_TYPE == "new_campaign")
+st.session_state.setdefault("cb_artwork_update", DEFAULT_REPORT_TYPE == "artwork_update")
 
 # overlay state
 st.session_state.setdefault("overlay_active", False)
@@ -37,13 +56,44 @@ def reset_all():
 
     st.session_state["uploader_key"] += 1
     st.session_state["reset_nonce"] += 1
+    # report_type is deliberately left as-is: an operator building several decks
+    # of the same type shouldn't have to re-tick the box after every reset.
+
+    # A generated deck can be tens of MB; don't hold it across the rerun.
+    gc.collect()
     st.rerun()
+
+
+def on_type_toggle(clicked: str):
+    """
+    Enforce mutual exclusivity across the two report-type checkboxes.
+
+    Streamlit has already written the new value into session state by the time
+    this fires. If the user ticked a box, untick the other. If they unticked the
+    active one, re-tick it - a report always has exactly one template.
+    """
+    other = "artwork_update" if clicked == "new_campaign" else "new_campaign"
+
+    if st.session_state[f"cb_{clicked}"]:
+        st.session_state[f"cb_{other}"] = False
+        st.session_state["report_type"] = clicked
+    else:
+        # Refusing to untick keeps a template selected at all times.
+        st.session_state[f"cb_{clicked}"] = True
+
+    # The generated deck is built from a specific template. Switching type
+    # invalidates it, so drop it rather than let the user download the wrong one.
+    st.session_state["pptx_bytes"] = None
+    st.session_state["pptx_name"] = None
+    gc.collect()
 
 
 def on_upload_change():
     # Fires after browser upload completes (Streamlit receives files)
+    # Drop any previously generated deck before new files arrive.
     st.session_state["pptx_bytes"] = None
     st.session_state["pptx_name"] = None
+    gc.collect()
 
     # Trigger overlay + two-step parse
     st.session_state["overlay_active"] = True
@@ -212,6 +262,23 @@ table, table * {{
   cursor: not-allowed !important;
 }}
 
+/* Report type checkboxes - centred, brand-coloured */
+div[data-testid="stCheckbox"] {{
+  display: flex !important;
+  justify-content: center !important;
+}}
+
+div[data-testid="stCheckbox"] label p {{
+  color: #FFFFFF !important;
+  font-weight: 700 !important;
+  font-size: 1rem !important;
+}}
+
+div[data-testid="stCheckbox"] label span[data-baseweb="checkbox"] > div:first-child {{
+  background-color: #D7DF23 !important;
+  border-color: #D7DF23 !important;
+}}
+
 .block-container {{
   max-width: 1500px !important;
   padding-top: 1rem !important;
@@ -306,6 +373,31 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown("<div style='height:30px;'></div>", unsafe_allow_html=True)
+
+# ---------------------------
+# Report Type
+# ---------------------------
+# Two checkboxes, kept mutually exclusive. Ticking one unticks the other, so
+# the user can never select both or neither - the template is always defined.
+_, cb1, cb2, _ = st.columns([2, 1.4, 1.4, 2])
+
+with cb1:
+    st.checkbox(
+        "New Campaign",
+        key="cb_new_campaign",
+        on_change=on_type_toggle,
+        args=("new_campaign",),
+    )
+
+with cb2:
+    st.checkbox(
+        "Artwork Update",
+        key="cb_artwork_update",
+        on_change=on_type_toggle,
+        args=("artwork_update",),
+    )
+
+st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
 
 # ---------------------------
 # Uploader
@@ -430,7 +522,10 @@ if generate and valid_files:
     render_overlay()
 
     try:
-        pptx_bytes, pptx_name = generate_presentation_from_uploads(valid_files)
+        pptx_bytes, pptx_name = generate_presentation_from_uploads(
+            valid_files,
+            report_type=st.session_state["report_type"],
+        )
         st.session_state["pptx_bytes"] = pptx_bytes
         st.session_state["pptx_name"] = pptx_name
         st.success("PoP Report generated successfully.")
@@ -441,6 +536,7 @@ if generate and valid_files:
     finally:
         st.session_state["overlay_active"] = False
         render_overlay()
+        gc.collect()
 
 # ---------------------------
 # Download

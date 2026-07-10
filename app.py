@@ -176,11 +176,6 @@ div[data-testid="stFileUploader"] {{
   margin: 0 auto !important;
 }}
 
-div[data-testid="stFileUploader"] label {{
-  display: none !important;
-  visibility: hidden !important;
-}}
-
 /* Dropzone text */
 div[data-testid="stFileUploaderDropzone"] * {{
   color: #542D54 !important;
@@ -262,7 +257,7 @@ table, table * {{
   cursor: not-allowed !important;
 }}
 
-/* Report type checkboxes - centred, brand-coloured */
+/* Report type checkboxes - centred */
 div[data-testid="stCheckbox"] {{
   display: flex !important;
   justify-content: center !important;
@@ -272,11 +267,6 @@ div[data-testid="stCheckbox"] label p {{
   color: #FFFFFF !important;
   font-weight: 700 !important;
   font-size: 1rem !important;
-}}
-
-div[data-testid="stCheckbox"] label span[data-baseweb="checkbox"] > div:first-child {{
-  background-color: #D7DF23 !important;
-  border-color: #D7DF23 !important;
 }}
 
 .block-container {{
@@ -403,11 +393,12 @@ st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
 # Uploader
 # ---------------------------
 uploaded_files = st.file_uploader(
-    "upload",
+    "Upload campaign images",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True,
     key=f"uploader_{st.session_state['uploader_key']}",
     on_change=on_upload_change,
+    label_visibility="collapsed",
 )
 
 # ---------------------------

@@ -185,11 +185,17 @@ div[data-testid="stFileUploader"] div[data-testid="stWidgetLabel"] {{
   display: none !important;
 }}
 
-/* Dropzone text - scoped to the elements that actually carry text, never `*` */
-div[data-testid="stFileUploaderDropzone"] span,
-div[data-testid="stFileUploaderDropzone"] small,
-div[data-testid="stFileUploaderDropzone"] div,
-div[data-testid="stFileUploaderDropzone"] p {{
+/* Dropzone helper text only. Deliberately excludes anything inside the
+   Browse button — styling the button's inner nodes as generic dropzone
+   text was stacking two copies of its label ("upload" over "upload"). */
+div[data-testid="stFileUploaderDropzone"] > span,
+div[data-testid="stFileUploaderDropzone"] > small,
+div[data-testid="stFileUploaderDropzone"] > div:not([data-testid]):not(:has(button)),
+div[data-testid="stFileUploaderDropzone"] > p {{
+  color: #542D54 !important;
+}}
+div[data-testid="stFileUploaderDropzoneInstructions"],
+div[data-testid="stFileUploaderDropzoneInstructions"] * {{
   color: #542D54 !important;
 }}
 
@@ -203,6 +209,24 @@ div[data-testid="stFileUploader"] button {{
   color: #542D54 !important;
   font-weight: 700 !important;
   border-radius: 8px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 0 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  position: relative !important;
+}}
+/* Collapse any duplicate label nodes Streamlit renders inside the button
+   down to a single visible one, so the text can never overlap itself. */
+div[data-testid="stFileUploader"] button > div,
+div[data-testid="stFileUploader"] button > span {{
+  position: static !important;
+  inset: auto !important;
+}}
+div[data-testid="stFileUploader"] button > div ~ div,
+div[data-testid="stFileUploader"] button > span ~ span {{
+  display: none !important;
 }}
 
 /* Remove file chips/list */
